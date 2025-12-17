@@ -201,6 +201,8 @@ export default function Home() {
     loadJson(FIELD_HINTS_KEY, {}),
   );
 
+  const [worldbookEntryHints, setWorldbookEntryHints] = useState<Record<string, string>>({});
+
   const dragIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -344,6 +346,21 @@ export default function Home() {
     });
   };
 
+  const updateWorldbookEntry = (idx: number, patch: Partial<CharacterBookEntry>) => {
+    setCard((prev) => {
+      const entries = prev.data.character_book?.entries ?? [];
+      if (idx < 0 || idx >= entries.length) return prev;
+      const nextEntries = entries.map((e, i) => (i === idx ? { ...e, ...patch } : e));
+      return {
+        ...prev,
+        data: {
+          ...prev.data,
+          character_book: { ...(prev.data.character_book ?? { name: "", entries: [] }), entries: nextEntries },
+        },
+      };
+    });
+  };
+
   const buildContextUser = () => {
     const cardSnapshot = cardToJsonString(card);
     return `【写卡目标】\n${goal || "(未填写)"}\n\n【当前角色卡草稿（JSON）】\n${cardSnapshot}\n\n${
@@ -464,6 +481,40 @@ export default function Home() {
         }));
         setNotice(`已覆盖 worldbook entries（${entries.length} 条）`);
       }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const generateWorldbookEntryContent = async (idx: number, mode: "fill" | "rewrite") => {
+    const entry = card.data.character_book?.entries?.[idx];
+    if (!entry) return;
+
+    setBusy(`正在生成：世界书条目 ${idx + 1}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const id = entry.id ?? String(idx);
+      const hint = (worldbookEntryHints[id] ?? "").trim();
+      const keys = (entry.keys ?? []).join("、");
+      const existing = entry.content ?? "";
+
+      const content = await callChat([
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: `${buildContextUser()}\n【目标条目】\nkeys：${keys || "(空)"}\ncomment：${entry.comment || "(空)"}\nposition：${entry.position || "before_char"}\n\n【当前 content】\n${existing || "(空)"}\n\n【任务】\n${
+            mode === "fill"
+              ? `请补全该 worldbook 条目的 content，使其可直接用于酒馆触发，并尽量与 keys/comment 匹配。${hint ? `\n额外要求：${hint}` : ""}`
+              : `请改写该 worldbook 条目的 content，保留信息但让表达更清晰、更适合被模型吸收。${hint ? `\n额外要求：${hint}` : ""}`
+          }\n\n要求：只输出 content 文本本体，不要 JSON，不要代码块，不要解释。`,
+        },
+      ]);
+
+      updateWorldbookEntry(idx, { content: content.trim() });
+      setNotice(`已更新世界书条目 ${idx + 1} content`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -976,6 +1027,9 @@ export default function Home() {
                   <div className="flex items-end justify-between gap-2">
                     <Label>entries</Label>
                     <div className="flex gap-2">
+                      <Button variant="secondary" disabled={!!busy} onClick={() => void generateWorldbook()}>
+                        AI 生成条目
+                      </Button>
                       <Button
                         variant="secondary"
                         disabled={!!busy}
@@ -1026,6 +1080,14 @@ export default function Home() {
                       <div className="mb-2 flex items-center justify-between gap-2">
                         <div className="text-sm font-semibold">条目 {idx + 1}</div>
                         <div className="flex items-center gap-2">
+                          <Button
+                            variant="secondary"
+                            disabled={!!busy}
+                            onClick={() => void generateWorldbookEntryContent(idx, (e.content ?? "").trim() ? "rewrite" : "fill")}
+                            title="为本条生成/改写 content（不改 keys/comment 等）"
+                          >
+                            AI 补全本条
+                          </Button>
                           <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200">
                             <input
                               type="checkbox"
@@ -1105,6 +1167,31 @@ export default function Home() {
                               }))
                             }
                           />
+                        </div>
+                      </div>
+
+                      <div className="mt-3 flex flex-col gap-2">
+                        <Label>本条 AI 指令（可选）</Label>
+                        <TextInput
+                          value={worldbookEntryHints[(e.id ?? String(idx)) as string] ?? ""}
+                          onChange={(v) => setWorldbookEntryHints((prev) => ({ ...prev, [String(e.id ?? idx)]: v }))}
+                          placeholder="例如：更偏设定书口吻/补充细节/加一条规则边界…"
+                        />
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            variant="secondary"
+                            disabled={!!busy}
+                            onClick={() => void generateWorldbookEntryContent(idx, "fill")}
+                          >
+                            AI 补全 content
+                          </Button>
+                          <Button
+                            variant="secondary"
+                            disabled={!!busy}
+                            onClick={() => void generateWorldbookEntryContent(idx, "rewrite")}
+                          >
+                            AI 改写 content
+                          </Button>
                         </div>
                       </div>
 
