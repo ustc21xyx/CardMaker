@@ -31,6 +31,7 @@ type TabKey = "core" | "greetings" | "worldbook" | "extensions" | "chat" | "expo
 const SETTINGS_KEY = "cardmaker.settings.v1";
 const CARD_DRAFT_KEY = "cardmaker.cardDraft.v1";
 const CHAT_KEY = "cardmaker.chat.v1";
+const FIELD_HINTS_KEY = "cardmaker.fieldHints.v1";
 
 const uid = () => Math.random().toString(16).slice(2) + Date.now().toString(16);
 
@@ -196,6 +197,10 @@ export default function Home() {
   const [worldbookBatchSize, setWorldbookBatchSize] = useState(8);
   const [worldbookAppend, setWorldbookAppend] = useState(true);
 
+  const [fieldHints, setFieldHints] = useState<Partial<Record<keyof CharaCardV3["data"], string>>>(() =>
+    loadJson(FIELD_HINTS_KEY, {}),
+  );
+
   const dragIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -209,6 +214,10 @@ export default function Home() {
   useEffect(() => {
     saveJson(CHAT_KEY, chat);
   }, [chat]);
+
+  useEffect(() => {
+    saveJson(FIELD_HINTS_KEY, fieldHints);
+  }, [fieldHints]);
 
   useEffect(() => {
     return () => {
@@ -347,11 +356,17 @@ export default function Home() {
     setError(null);
     setNotice(null);
     try {
+      const custom = (fieldHints[field] ?? "").trim();
+      const existing = String(card.data[field] ?? "");
       const content = await callChat([
         { role: "system", content: systemPrompt },
         {
           role: "user",
-          content: `${buildContextUser()}\n【任务】\n${instruction}\n\n要求：只输出最终文本本体，不要解释，不要代码块。`,
+          content: `${buildContextUser()}\n【当前字段】${String(field)}\n【当前字段内容】\n${existing || "(空)"}\n\n【任务】\n${
+            custom
+              ? `请根据用户要求改写该字段。\n用户要求：${custom}`
+              : instruction
+          }\n\n要求：只输出最终文本本体，不要解释，不要代码块。`,
         },
       ]);
       setCardField(field, content.trim());
@@ -796,6 +811,11 @@ export default function Home() {
                       AI 生成
                     </Button>
                   </div>
+                  <TextInput
+                    value={fieldHints.description ?? ""}
+                    onChange={(v) => setFieldHints((p) => ({ ...p, description: v }))}
+                    placeholder="自定义指令（可选）：例如 改得更暧昧/更克制/更贴合资料…"
+                  />
                   <TextArea value={card.data.description} onChange={(v) => setCardField("description", v)} rows={6} />
                 </div>
 
@@ -810,6 +830,11 @@ export default function Home() {
                       AI 生成
                     </Button>
                   </div>
+                  <TextInput
+                    value={fieldHints.personality ?? ""}
+                    onChange={(v) => setFieldHints((p) => ({ ...p, personality: v }))}
+                    placeholder="自定义指令（可选）：例如 加强反差/增加口癖/更强边界感…"
+                  />
                   <TextArea value={card.data.personality} onChange={(v) => setCardField("personality", v)} rows={8} />
                 </div>
 
@@ -824,6 +849,11 @@ export default function Home() {
                       AI 生成
                     </Button>
                   </div>
+                  <TextInput
+                    value={fieldHints.scenario ?? ""}
+                    onChange={(v) => setFieldHints((p) => ({ ...p, scenario: v }))}
+                    placeholder="自定义指令（可选）：例如 加入明确玩法/限制/推进节奏…"
+                  />
                   <TextArea value={card.data.scenario} onChange={(v) => setCardField("scenario", v)} rows={10} />
                 </div>
 
@@ -838,6 +868,11 @@ export default function Home() {
                       AI 生成
                     </Button>
                   </div>
+                  <TextInput
+                    value={fieldHints.first_mes ?? ""}
+                    onChange={(v) => setFieldHints((p) => ({ ...p, first_mes: v }))}
+                    placeholder="自定义指令（可选）：例如 改成更强钩子/更短/带状态栏…"
+                  />
                   <TextArea value={card.data.first_mes} onChange={(v) => setCardField("first_mes", v)} rows={10} />
                 </div>
 
@@ -852,6 +887,11 @@ export default function Home() {
                       AI 生成
                     </Button>
                   </div>
+                  <TextInput
+                    value={fieldHints.mes_example ?? ""}
+                    onChange={(v) => setFieldHints((p) => ({ ...p, mes_example: v }))}
+                    placeholder="自定义指令（可选）：例如 示例更长/更多轮/更强角色口癖…"
+                  />
                   <TextArea value={card.data.mes_example} onChange={(v) => setCardField("mes_example", v)} rows={12} />
                 </div>
               </div>
