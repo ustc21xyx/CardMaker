@@ -24,10 +24,13 @@ type RefFile = {
   content: string;
 };
 
-type TabKey = "core" | "greetings" | "worldbook" | "extensions" | "export" | "settings";
+type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
+
+type TabKey = "core" | "greetings" | "worldbook" | "extensions" | "chat" | "export" | "settings";
 
 const SETTINGS_KEY = "cardmaker.settings.v1";
 const CARD_DRAFT_KEY = "cardmaker.cardDraft.v1";
+const CHAT_KEY = "cardmaker.chat.v1";
 
 const uid = () => Math.random().toString(16).slice(2) + Date.now().toString(16);
 
@@ -45,6 +48,7 @@ const tabLabel: Record<TabKey, string> = {
   greetings: "问候",
   worldbook: "世界书",
   extensions: "扩展项",
+  chat: "对话增量",
   export: "导入/导出",
   settings: "API 设置",
 };
@@ -65,6 +69,16 @@ const getChatContent = (json: unknown): string | null => {
   const obj = json as { choices?: Array<{ message?: { content?: unknown } }> };
   const content = obj.choices?.[0]?.message?.content;
   return typeof content === "string" ? content : null;
+};
+
+const extractTag = (text: string, tagName: string): string | null => {
+  const open = `<${tagName}>`;
+  const close = `</${tagName}>`;
+  const start = text.indexOf(open);
+  if (start < 0) return null;
+  const end = text.indexOf(close, start + open.length);
+  if (end < 0) return null;
+  return text.slice(start + open.length, end).trim();
 };
 
 const Label = ({ children }: { children: ReactNode }) => (
@@ -167,6 +181,21 @@ export default function Home() {
 
   const [png, setPng] = useState<{ name: string; bytes: Uint8Array; url: string } | null>(null);
 
+  const [chat, setChat] = useState<ChatMessage[]>(() =>
+    loadJson<ChatMessage[]>(CHAT_KEY, [
+      {
+        role: "assistant",
+        content:
+          "你可以直接对我说“补充世界书：势力、地点、规则”“把 first_mes 改成更强钩子”等。我会用 <append_entries> / <set_fields> 的方式把改动应用到草稿。",
+      },
+    ]),
+  );
+  const [chatInput, setChatInput] = useState("");
+  const [chatAutoApply, setChatAutoApply] = useState(true);
+
+  const [worldbookBatchSize, setWorldbookBatchSize] = useState(8);
+  const [worldbookAppend, setWorldbookAppend] = useState(true);
+
   const dragIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -176,6 +205,10 @@ export default function Home() {
   useEffect(() => {
     saveJson(CARD_DRAFT_KEY, card);
   }, [card]);
+
+  useEffect(() => {
+    saveJson(CHAT_KEY, chat);
+  }, [chat]);
 
   useEffect(() => {
     return () => {
@@ -245,6 +278,63 @@ export default function Home() {
 
   const systemPrompt = `你是 SillyTavern（酒馆）角色卡的写卡助手。你了解 chara_card_v3 (spec_version 3.0) 的字段与写卡习惯。请用中文写作，表达自然、有可玩性，避免空泛。`;
 
+  const normalizeEntry = (value: unknown): CharacterBookEntry => {
+    const v = value as Record<string, unknown>;
+    const keys = Array.isArray(v?.keys) ? v.keys.map((x) => String(x).trim()).filter(Boolean) : [];
+    const content = typeof v?.content === "string" ? v.content : "";
+    const comment = typeof v?.comment === "string" ? v.comment : "";
+    const enabled = typeof v?.enabled === "boolean" ? v.enabled : true;
+    const position = typeof v?.position === "string" ? v.position : "before_char";
+    const insertion_order = typeof v?.insertion_order === "number" ? v.insertion_order : 100;
+    const constant = typeof v?.constant === "boolean" ? v.constant : true;
+    const selective = typeof v?.selective === "boolean" ? v.selective : true;
+    const id = typeof v?.id === "string" ? v.id : uid();
+    return { id, keys, content, comment, enabled, position, insertion_order, constant, selective };
+  };
+
+  const applySetFields = (fields: Record<string, unknown>) => {
+    const allowed: Array<keyof CharaCardV3["data"]> = [
+      "name",
+      "description",
+      "personality",
+      "scenario",
+      "first_mes",
+      "mes_example",
+      "creator_notes",
+      "system_prompt",
+      "post_history_instructions",
+    ];
+    setCard((prev) => {
+      const nextData = { ...prev.data };
+      for (const key of allowed) {
+        if (typeof fields[key] === "string") nextData[key] = fields[key] as never;
+      }
+      if (Array.isArray(fields.tags)) {
+        nextData.tags = fields.tags.map((x) => String(x).trim()).filter(Boolean);
+      }
+      return { ...prev, data: nextData };
+    });
+  };
+
+  const appendWorldbookEntries = (entriesRaw: unknown[]) => {
+    const entries = entriesRaw.map(normalizeEntry).filter((e) => e.keys.length > 0 || e.content.trim().length > 0);
+    setCard((prev) => {
+      const existing = prev.data.character_book?.entries ?? [];
+      const existingKeySig = new Set(existing.map((e) => (e.keys ?? []).join("|").toLowerCase()));
+      const deduped = entries.filter((e) => !existingKeySig.has((e.keys ?? []).join("|").toLowerCase()));
+      return {
+        ...prev,
+        data: {
+          ...prev.data,
+          character_book: {
+            ...(prev.data.character_book ?? { name: "", entries: [] }),
+            entries: [...existing, ...deduped],
+          },
+        },
+      };
+    });
+  };
+
   const buildContextUser = () => {
     const cardSnapshot = cardToJsonString(card);
     return `【写卡目标】\n${goal || "(未填写)"}\n\n【当前角色卡草稿（JSON）】\n${cardSnapshot}\n\n${
@@ -297,8 +387,8 @@ export default function Home() {
     }
   };
 
-  const generateWorldbook = async () => {
-    setBusy("正在生成：世界书条目");
+  const generateFullCardPlaceholder = async () => {
+    setBusy("正在生成：占位整卡");
     setError(null);
     setNotice(null);
     try {
@@ -306,38 +396,107 @@ export default function Home() {
         { role: "system", content: systemPrompt },
         {
           role: "user",
-          content: `${buildContextUser()}\n【任务】\n请为该角色生成酒馆 worldbook（character_book.entries）。\n输出要求：只输出 JSON 数组，每个元素包含 keys(字符串数组)、content(字符串)、comment(字符串，可空)、enabled(boolean)、position(\"before_char\")、insertion_order(数字)、constant(boolean)、selective(boolean)。\n不要代码块，不要解释。`,
+          content: `${buildContextUser()}\n【任务】\n请生成一份“占位版”的 chara_card_v3 JSON（包含 spec/spec_version 与 data）。\n要求：\n- 可玩性优先，但整体尽量短\n- worldbook（character_book.entries）只输出 ${Math.max(1, Math.min(30, worldbookBatchSize))} 条以内：每条 keys 要具体；content 用“（待补充：...）”占位，comment 写明用途\n- description/personality/scenario/first_mes/mes_example 可以用“（待补充）/大纲式要点”占位，避免写长\n输出格式：只输出 JSON，不要代码块，不要解释。`,
+        },
+      ]);
+      const jsonText = extractFirstJsonObject(content) ?? content.trim();
+      const parsed = tryParseJson<unknown>(jsonText);
+      if (!parsed.ok) throw new Error(`JSON 解析失败：${parsed.error}`);
+      setCard(normalizeImportedCard(parsed.value));
+      setNotice("已生成占位整卡（后续可分字段/对话增量完善）");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const generateWorldbook = async () => {
+    setBusy(worldbookAppend ? "正在生成：世界书条目（追加）" : "正在生成：世界书条目（覆盖）");
+    setError(null);
+    setNotice(null);
+    try {
+      const existingKeys = (card.data.character_book?.entries ?? [])
+        .flatMap((e) => e.keys ?? [])
+        .map((k) => k.trim())
+        .filter(Boolean)
+        .slice(0, 200);
+      const content = await callChat([
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: `${buildContextUser()}\n【任务】\n请为该角色生成酒馆 worldbook（character_book.entries）。\n要求：本次只生成 ${Math.max(1, Math.min(30, worldbookBatchSize))} 条；尽量不重复已有 keys（已有 keys：${existingKeys.join("、") || "无"}）。\n输出要求：只输出 JSON 数组，每个元素包含 keys(字符串数组)、content(字符串)、comment(字符串，可空)、enabled(boolean)、position(\"before_char\")、insertion_order(数字)、constant(boolean)、selective(boolean)。\n不要代码块，不要解释。`,
         },
       ]);
       const jsonText = extractFirstJsonArray(content) ?? content.trim();
       const parsed = tryParseJson<unknown>(jsonText);
       if (!parsed.ok) throw new Error(`JSON 解析失败：${parsed.error}`);
       if (!Array.isArray(parsed.value)) throw new Error("模型没有输出 JSON 数组");
-      const normalizeEntry = (value: unknown): CharacterBookEntry => {
-        const v = value as Record<string, unknown>;
-        const keys = Array.isArray(v?.keys) ? v.keys.map((x) => String(x).trim()).filter(Boolean) : [];
-        const content = typeof v?.content === "string" ? v.content : "";
-        const comment = typeof v?.comment === "string" ? v.comment : "";
-        const enabled = typeof v?.enabled === "boolean" ? v.enabled : true;
-        const position = typeof v?.position === "string" ? v.position : "before_char";
-        const insertion_order = typeof v?.insertion_order === "number" ? v.insertion_order : 100;
-        const constant = typeof v?.constant === "boolean" ? v.constant : true;
-        const selective = typeof v?.selective === "boolean" ? v.selective : true;
-        const id = typeof v?.id === "string" ? v.id : uid();
-        return { id, keys, content, comment, enabled, position, insertion_order, constant, selective };
-      };
-      const entries = (parsed.value as unknown[]).map(normalizeEntry).filter((e) => e.keys.length > 0 || e.content.trim().length > 0);
-      setCard((prev) => ({
-        ...prev,
-        data: {
-          ...prev.data,
-          character_book: {
-            ...(prev.data.character_book ?? { name: "", entries: [] }),
-            entries,
+      const entries = (parsed.value as unknown[]).map(normalizeEntry);
+      if (worldbookAppend) {
+        appendWorldbookEntries(entries);
+        setNotice(`已追加 worldbook entries（本次 ${entries.length} 条）`);
+      } else {
+        setCard((prev) => ({
+          ...prev,
+          data: {
+            ...prev.data,
+            character_book: {
+              ...(prev.data.character_book ?? { name: "", entries: [] }),
+              entries: entries.filter((e) => e.keys.length > 0 || e.content.trim().length > 0),
+            },
           },
-        },
-      }));
-      setNotice("已覆盖 worldbook entries");
+        }));
+        setNotice(`已覆盖 worldbook entries（${entries.length} 条）`);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const sendChat = async () => {
+    const text = chatInput.trim();
+    if (!text) return;
+    setChatInput("");
+    setError(null);
+    setNotice(null);
+
+    const protocol = `当你需要让我自动更新草稿时，请使用以下标签输出结构化 JSON（可以同时出现多个标签；标签外可以有简短说明）：\n- <set_fields>{...}</set_fields>：更新角色卡 data 字段（name/description/personality/scenario/first_mes/mes_example/creator_notes/system_prompt/post_history_instructions/tags）\n- <append_entries>[...]</append_entries>：追加 worldbook entries（数组元素包含 keys/content/comment/enabled/position/insertion_order/constant/selective）\n要求：JSON 必须可解析，禁止代码块。`;
+
+    const currentWorldbookSummary = (card.data.character_book?.entries ?? [])
+      .slice(0, 30)
+      .map((e, i) => `${i + 1}. ${(e.keys ?? []).join(" / ")} :: ${(e.comment ?? "").slice(0, 30)}`)
+      .join("\n");
+
+    const messages: ChatMessage[] = [
+      { role: "system", content: `${systemPrompt}\n\n${protocol}` },
+      {
+        role: "user",
+        content: `${buildContextUser()}\n【当前世界书条目摘要（前 30 条）】\n${currentWorldbookSummary || "(无)"}\n\n【对话指令】\n${text}`,
+      },
+    ];
+
+    setBusy("正在对话…");
+    try {
+      const reply = await callChat(messages);
+      setChat((prev) => [...prev, { role: "user", content: text }, { role: "assistant", content: reply }]);
+
+      if (!chatAutoApply) return;
+      const setFieldsText = extractTag(reply, "set_fields");
+      if (setFieldsText) {
+        const parsed = tryParseJson<Record<string, unknown>>(setFieldsText);
+        if (parsed.ok) applySetFields(parsed.value);
+        else setError(`set_fields JSON 解析失败：${parsed.error}`);
+      }
+      const appendEntriesText = extractTag(reply, "append_entries");
+      if (appendEntriesText) {
+        const parsed = tryParseJson<unknown>(appendEntriesText);
+        if (parsed.ok && Array.isArray(parsed.value)) appendWorldbookEntries(parsed.value as unknown[]);
+        else if (parsed.ok) setError("append_entries 不是 JSON 数组");
+        else setError(`append_entries JSON 解析失败：${parsed.error}`);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -469,6 +628,9 @@ export default function Home() {
           <div className="flex flex-wrap gap-2">
             <Button onClick={() => void generateFullCard()} disabled={!!busy} title="让模型生成整张卡（会覆盖当前草稿）">
               生成整卡
+            </Button>
+            <Button onClick={() => void generateFullCardPlaceholder()} disabled={!!busy} variant="secondary" title="先生成占位版骨架，后续再分批完善">
+              占位整卡
             </Button>
             <Button onClick={exportJson} variant="secondary">
               导出 JSON
@@ -729,6 +891,33 @@ export default function Home() {
 
             {tab === "worldbook" && (
               <div className="flex flex-col gap-4">
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="flex flex-col gap-2">
+                    <Label>生成模式</Label>
+                    <div className="flex items-center gap-2 text-sm">
+                      <label className="flex items-center gap-2">
+                        <input type="radio" checked={worldbookAppend} onChange={() => setWorldbookAppend(true)} />
+                        追加
+                      </label>
+                      <label className="flex items-center gap-2">
+                        <input type="radio" checked={!worldbookAppend} onChange={() => setWorldbookAppend(false)} />
+                        覆盖
+                      </label>
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <Label>每批条数</Label>
+                    <TextInput value={String(worldbookBatchSize)} onChange={(v) => setWorldbookBatchSize(Math.max(1, Math.min(30, Number(v) || 1)))} />
+                    <Help>建议 5–15；太大容易跑偏/超长</Help>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <Label>快捷</Label>
+                    <Button variant="secondary" disabled={!!busy} onClick={() => void generateWorldbook()}>
+                      AI 生成条目
+                    </Button>
+                  </div>
+                </div>
+
                 <div className="flex flex-col gap-2">
                   <Label>character_book.name</Label>
                   <TextInput
@@ -747,9 +936,6 @@ export default function Home() {
                   <div className="flex items-end justify-between gap-2">
                     <Label>entries</Label>
                     <div className="flex gap-2">
-                      <Button variant="secondary" disabled={!!busy} onClick={() => void generateWorldbook()}>
-                        AI 生成条目
-                      </Button>
                       <Button
                         variant="secondary"
                         disabled={!!busy}
@@ -925,6 +1111,81 @@ export default function Home() {
                       setCard((prev) => ({ ...prev, data: { ...prev.data, extensions: parsed.value } }));
                     }}
                   />
+                </div>
+              </div>
+            )}
+
+            {tab === "chat" && (
+              <div className="flex flex-col gap-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex flex-col gap-1">
+                    <Label>对话增量完善</Label>
+                    <Help>让 AI 用 &lt;append_entries&gt; / &lt;set_fields&gt; 自动把修改应用到草稿</Help>
+                  </div>
+                  <div className="flex items-center gap-2 text-sm">
+                    <label className="flex items-center gap-2">
+                      <input type="checkbox" checked={chatAutoApply} onChange={(e) => setChatAutoApply(e.target.checked)} />
+                      自动应用
+                    </label>
+                    <Button
+                      variant="secondary"
+                      onClick={() =>
+                        setChat([
+                          {
+                            role: "assistant",
+                            content:
+                              "你可以直接对我说“补充世界书：势力、地点、规则”“把 first_mes 改成更强钩子”等。我会用 <append_entries> / <set_fields> 的方式把改动应用到草稿。",
+                          },
+                        ])
+                      }
+                    >
+                      清空对话
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="h-[420px] overflow-auto rounded-xl bg-zinc-50 p-3 ring-1 ring-zinc-200 dark:bg-zinc-900 dark:ring-zinc-800">
+                  <div className="flex flex-col gap-3">
+                    {chat.map((m, i) => (
+                      <div key={i} className={`rounded-lg p-2 text-sm ${m.role === "user" ? "bg-white dark:bg-zinc-950" : ""}`}>
+                        <div className="mb-1 text-xs font-medium text-zinc-500">{m.role}</div>
+                        <pre className="whitespace-pre-wrap break-words font-sans">{m.content}</pre>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label>输入</Label>
+                  <TextArea
+                    value={chatInput}
+                    onChange={setChatInput}
+                    rows={4}
+                    placeholder="例如：继续追加世界书 8 条，主题是【势力/地点/规则】，不要重复已有 keys；或：把 scenario 改成更强互动边界。"
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <Button onClick={() => void sendChat()} disabled={!!busy}>
+                      发送
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      disabled={!!busy}
+                      onClick={() => {
+                        setChatInput("继续追加世界书 8 条，主题为【势力/地点/规则】，不要重复已有 keys；content 允许先用（待补充）占位。");
+                      }}
+                    >
+                      追加世界书词条
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      disabled={!!busy}
+                      onClick={() => {
+                        setChatInput("请检查当前卡是否有明显逻辑漏洞或写卡禁忌，并用 <set_fields> 给出改进后的字段（尽量只改必要字段）。");
+                      }}
+                    >
+                      自检并改进
+                    </Button>
+                  </div>
                 </div>
               </div>
             )}
