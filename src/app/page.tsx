@@ -417,8 +417,10 @@ export default function Home() {
     const insertion_order = typeof v?.insertion_order === "number" ? v.insertion_order : 100;
     const constant = typeof v?.constant === "boolean" ? v.constant : true;
     const selective = typeof v?.selective === "boolean" ? v.selective : true;
+    const probabilityRaw = typeof v?.probability === "number" ? v.probability : 100;
+    const probability = Number.isFinite(probabilityRaw) ? Math.max(0, Math.min(100, Math.round(probabilityRaw))) : 100;
     const id = typeof v?.id === "string" ? v.id : uid();
-    return { id, keys, content, comment, enabled, position, insertion_order, constant, selective };
+    return { id, keys, content, comment, enabled, position, insertion_order, constant, selective, probability };
   };
 
   const applySetFields = (fields: Record<string, unknown>) => {
@@ -571,7 +573,7 @@ export default function Home() {
         { role: "system", content: systemPrompt },
         {
           role: "user",
-          content: `${buildContextUser()}\n【任务】\n请为该角色生成酒馆 worldbook（character_book.entries）。\n要求：本次只生成 ${Math.max(1, Math.min(30, worldbookBatchSize))} 条；尽量不重复已有 keys（已有 keys：${existingKeys.join("、") || "无"}）。\n输出要求：只输出 JSON 数组，每个元素包含 keys(字符串数组)、content(字符串)、comment(字符串，可空)、enabled(boolean)、position(\"before_char\")、insertion_order(数字)、constant(boolean)、selective(boolean)。\n不要代码块，不要解释。`,
+          content: `${buildContextUser()}\n【任务】\n请为该角色生成酒馆 worldbook（character_book.entries）。\n要求：本次只生成 ${Math.max(1, Math.min(30, worldbookBatchSize))} 条；尽量不重复已有 keys（已有 keys：${existingKeys.join("、") || "无"}）。\n输出要求：只输出 JSON 数组，每个元素包含 keys(字符串数组)、content(字符串)、comment(字符串，可空)、enabled(boolean)、position(\"before_char\")、insertion_order(数字)、constant(boolean)、selective(boolean)、probability(0-100 数字)。\n不要代码块，不要解释。`,
         },
       ]);
       const jsonText = extractFirstJsonArray(content) ?? content.trim();
@@ -628,7 +630,7 @@ export default function Home() {
         { role: "system", content: systemPrompt },
         {
           role: "user",
-          content: `${buildContextUser()}\n【目标条目】\nkeys：${keys || "(空)"}\ncomment：${entry.comment || "(空)"}\nposition：${entry.position || "before_char"}\n\n【当前 content（带行号）】\n${numbered || "(空)"}\n\n【用户指令】\n${instruction}\n\n【任务】\n请在尽量少改动现有内容的前提下，根据“用户指令”对 content 做修改，并输出“unified diff”。\n\n严格要求：\n1) 只输出 diff 文本本体，不要解释，不要代码块\n2) diff 目标文件名固定为 content，必须包含：\n--- a/content\n+++ b/content\n3) 必须包含至少一个 hunk（@@ -l,s +l,s @@），并尽量提供足够上下文行保证可应用\n4) 除非用户明确要求，否则不要改动无关行；如果只是补充信息，请尽量采用追加/局部插入而不是重写全文\n`,
+          content: `${buildContextUser()}\n【目标条目】\nkeys：${keys || "(空)"}\ncomment：${entry.comment || "(空)"}\nposition：${entry.position || "before_char"}\nenabled：${String(entry.enabled ?? true)}\nconstant(蓝灯)：${String(entry.constant ?? true)}\nselective(绿灯)：${String(entry.selective ?? true)}\ninsertion_order(顺序)：${String(entry.insertion_order ?? 100)}\nprobability(概率 0-100)：${String(entry.probability ?? 100)}\n\n【当前 content（带行号）】\n${numbered || "(空)"}\n\n【用户指令】\n${instruction}\n\n【任务】\n请在尽量少改动现有内容的前提下，根据“用户指令”对 content 做修改，并输出“unified diff”。\n\n严格要求：\n1) 只输出 diff 文本本体，不要解释，不要代码块\n2) diff 目标文件名固定为 content，必须包含：\n--- a/content\n+++ b/content\n3) 必须包含至少一个 hunk（@@ -l,s +l,s @@），并尽量提供足够上下文行保证可应用\n4) 除非用户明确要求，否则不要改动无关行；如果只是补充信息，请尽量采用追加/局部插入而不是重写全文\n`,
         },
       ]);
 
@@ -1219,6 +1221,7 @@ export default function Home() {
                                     insertion_order: 100,
                                     constant: true,
                                     selective: true,
+                                    probability: 100,
                                   },
                                 ],
                               },
@@ -1246,27 +1249,61 @@ export default function Home() {
                     >
                       <div className="mb-2 flex items-center justify-between gap-2">
                         <div className="text-sm font-semibold">条目 {idx + 1}</div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200">
                             <input
                               type="checkbox"
                               checked={e.enabled ?? true}
-                              onChange={(ev) =>
-                                setCard((prev) => ({
-                                  ...prev,
-                                  data: {
-                                    ...prev.data,
-                                    character_book: {
-                                      ...(prev.data.character_book ?? { name: "", entries: [] }),
-                                      entries: (prev.data.character_book?.entries ?? []).map((x, i) =>
-                                        i === idx ? { ...x, enabled: ev.target.checked } : x,
-                                      ),
-                                    },
-                                  },
-                                }))
-                              }
+                              onChange={(ev) => updateWorldbookEntry(idx, { enabled: ev.target.checked })}
                             />
-                            enabled
+                            默认启用
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200" title="蓝灯：常驻（constant）">
+                            <span className="h-2.5 w-2.5 rounded-full bg-blue-500" />
+                            <input
+                              type="checkbox"
+                              checked={e.constant ?? true}
+                              onChange={(ev) => updateWorldbookEntry(idx, { constant: ev.target.checked })}
+                            />
+                            蓝灯
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200" title="绿灯：选择性（selective）">
+                            <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
+                            <input
+                              type="checkbox"
+                              checked={e.selective ?? true}
+                              onChange={(ev) => updateWorldbookEntry(idx, { selective: ev.target.checked })}
+                            />
+                            绿灯
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200" title="顺序（insertion_order），越小越靠前">
+                            顺序
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              className="w-20 rounded-md bg-white px-2 py-1 text-sm text-zinc-900 ring-1 ring-zinc-200 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 dark:ring-zinc-800 dark:focus:ring-zinc-100"
+                              value={String(e.insertion_order ?? 100)}
+                              onChange={(ev) => {
+                                const n = Number(ev.target.value);
+                                updateWorldbookEntry(idx, { insertion_order: Number.isFinite(n) ? Math.trunc(n) : 100 });
+                              }}
+                            />
+                          </label>
+                          <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200" title="触发概率（probability），0-100">
+                            概率
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              inputMode="numeric"
+                              className="w-20 rounded-md bg-white px-2 py-1 text-sm text-zinc-900 ring-1 ring-zinc-200 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 dark:ring-zinc-800 dark:focus:ring-zinc-100"
+                              value={String(e.probability ?? 100)}
+                              onChange={(ev) => {
+                                const n = Number(ev.target.value);
+                                const next = Number.isFinite(n) ? Math.max(0, Math.min(100, Math.trunc(n))) : 100;
+                                updateWorldbookEntry(idx, { probability: next });
+                              }}
+                            />
                           </label>
                           <button
                             className="rounded-md px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"

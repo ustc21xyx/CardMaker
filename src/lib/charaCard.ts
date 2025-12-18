@@ -6,6 +6,7 @@ export type CharacterBookEntry = {
   constant?: boolean;
   selective?: boolean;
   insertion_order?: number;
+  probability?: number;
   enabled?: boolean;
   position?: string;
 };
@@ -127,4 +128,3 @@ export const normalizeImportedCard = (input: unknown): CharaCardV3 => {
 
 export const cardToJsonString = (card: CharaCardV3): string =>
   JSON.stringify(syncTopLevelFromData(card), null, 2);
-
