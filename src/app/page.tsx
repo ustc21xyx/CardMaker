@@ -613,17 +613,40 @@ export default function Home() {
     if (!entry) return;
 
     const taskKey = `worldbook:entry:${String(entry.id ?? idx)}`;
-    startTask(taskKey, `世界书条目 ${idx + 1} 生成 Diff`);
+    const existing = entry.content ?? "";
+    const existingTrimmed = existing.trim();
+    startTask(taskKey, `世界书条目 ${idx + 1} ${existingTrimmed ? "生成 Diff" : "生成 content"}`);
     try {
       const id = String(entry.id ?? idx);
       const instruction = (worldbookEntryHints[id] ?? "").trim();
-      if (!instruction) {
-        pushEvent("error", "请先在“本条 AI 指令”里输入你希望怎么改，然后再生成 Diff");
+
+      const keys = (entry.keys ?? []).join("、");
+      // If content is empty, generate the full content directly (no diff workflow needed).
+      if (!existingTrimmed) {
+        const content = await callChat([
+          { role: "system", content: systemPrompt },
+          {
+            role: "user",
+            content: `${buildContextUser()}\n【目标条目】\nkeys：${keys || "(空)"}\ncomment：${entry.comment || "(空)"}\nposition：${entry.position || "before_char"}\nenabled：${String(entry.enabled ?? true)}\nconstant(蓝灯)：${String(entry.constant ?? true)}\nselective(绿灯)：${String(entry.selective ?? false)}\ninsertion_order(顺序)：${String(entry.insertion_order ?? 100)}\nprobability(概率 0-100)：${String(entry.probability ?? 100)}\n\n【用户指令】\n${instruction || "(无)"}\n\n【任务】\n请直接生成该 worldbook 条目的 content（用于酒馆触发）。\n要求：\n- 尽量与 keys/comment 匹配\n- 可直接被模型吸收（清晰、信息密度高）\n- 只输出 content 文本本体，不要 JSON，不要代码块，不要解释。\n`,
+          },
+        ]);
+
+        updateWorldbookEntry(idx, { content: content.trim() });
+        setWorldbookEntryDiffs((prev) => {
+          if (!prev[id]) return prev;
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        pushEvent("info", `已生成世界书条目 ${idx + 1} content`);
         return;
       }
 
-      const keys = (entry.keys ?? []).join("、");
-      const existing = entry.content ?? "";
+      if (!instruction) {
+        pushEvent("error", "请先在“本条 AI 指令”里输入你希望怎么改（或补充什么），再生成 Diff");
+        return;
+      }
+
       const numbered = existing
         .replace(/\r\n/g, "\n")
         .split("\n")
@@ -1383,7 +1406,9 @@ export default function Home() {
                               return next;
                             });
                           }}
-                          placeholder="例如：只新增一条规则（不要改其它段落）；把第 3 行改成更口语；补充地点细节（只追加）…"
+                          placeholder={(e.content ?? "").trim()
+                            ? "例如：只新增一条规则（不要改其它段落）；把第 3 行改成更口语；补充地点细节（只追加）…"
+                            : "例如：生成该条目的 content（偏设定书口吻/包含触发条件/加一条边界规则…）"}
                         />
                         <div className="flex flex-wrap gap-2">
                           <Button
