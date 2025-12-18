@@ -1361,7 +1361,7 @@ export default function Home() {
                             }
                             onClick={() => applyWorldbookEntryDiff(idx)}
                           >
-                            修改
+                            应用
                           </Button>
                         </div>
                         {worldbookEntryDiffs[String(e.id ?? idx)]?.diff && (
