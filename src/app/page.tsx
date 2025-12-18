@@ -415,8 +415,12 @@ export default function Home() {
     const enabled = typeof v?.enabled === "boolean" ? v.enabled : true;
     const position = typeof v?.position === "string" ? v.position : "before_char";
     const insertion_order = typeof v?.insertion_order === "number" ? v.insertion_order : 100;
-    const constant = typeof v?.constant === "boolean" ? v.constant : true;
-    const selective = typeof v?.selective === "boolean" ? v.selective : true;
+    const constantRaw = typeof v?.constant === "boolean" ? v.constant : true;
+    const selectiveRaw = typeof v?.selective === "boolean" ? v.selective : false;
+    // In SillyTavern UI, blue/green behaves like a single mode switch.
+    // Normalize legacy/mixed values to a deterministic single mode.
+    const constant = constantRaw && !selectiveRaw;
+    const selective = selectiveRaw;
     const probabilityRaw = typeof v?.probability === "number" ? v.probability : 100;
     const probability = Number.isFinite(probabilityRaw) ? Math.max(0, Math.min(100, Math.round(probabilityRaw))) : 100;
     const id = typeof v?.id === "string" ? v.id : uid();
@@ -1220,7 +1224,7 @@ export default function Home() {
                                     position: "before_char",
                                     insertion_order: 100,
                                     constant: true,
-                                    selective: true,
+                                    selective: false,
                                     probability: 100,
                                   },
                                 ],
@@ -1258,23 +1262,22 @@ export default function Home() {
                             />
                             默认启用
                           </label>
-                          <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200" title="蓝灯：常驻（constant）">
-                            <span className="h-2.5 w-2.5 rounded-full bg-blue-500" />
-                            <input
-                              type="checkbox"
-                              checked={e.constant ?? true}
-                              onChange={(ev) => updateWorldbookEntry(idx, { constant: ev.target.checked })}
-                            />
-                            蓝灯
-                          </label>
-                          <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200" title="绿灯：选择性（selective）">
-                            <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
-                            <input
-                              type="checkbox"
-                              checked={e.selective ?? true}
-                              onChange={(ev) => updateWorldbookEntry(idx, { selective: ev.target.checked })}
-                            />
-                            绿灯
+                          <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200" title="蓝/绿灯（SillyTavern 风格，二选一）">
+                            灯
+                            <select
+                              className="rounded-md bg-white px-2 py-1 text-sm text-zinc-900 ring-1 ring-zinc-200 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 dark:ring-zinc-800 dark:focus:ring-zinc-100"
+                              value={(e.selective ?? false) ? "green" : "blue"}
+                              onChange={(ev) => {
+                                const mode = ev.target.value;
+                                updateWorldbookEntry(idx, {
+                                  constant: mode === "blue",
+                                  selective: mode === "green",
+                                });
+                              }}
+                            >
+                              <option value="blue">蓝（常驻）</option>
+                              <option value="green">绿（触发）</option>
+                            </select>
                           </label>
                           <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200" title="顺序（insertion_order），越小越靠前">
                             顺序
