@@ -176,9 +176,8 @@ export default function Home() {
   const [card, setCard] = useState<CharaCardV3>(() => normalizeImportedCard(loadJson(CARD_DRAFT_KEY, emptyCardV3())));
   const [goal, setGoal] = useState("");
   const [refFiles, setRefFiles] = useState<RefFile[]>([]);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [runningTasks, setRunningTasks] = useState<Record<string, { label: string; startedAt: number }>>({});
+  const [events, setEvents] = useState<Array<{ type: "info" | "error"; text: string; ts: number }>>([]);
 
   const [png, setPng] = useState<{ name: string; bytes: Uint8Array; url: string } | null>(null);
 
@@ -204,6 +203,30 @@ export default function Home() {
   const [worldbookEntryHints, setWorldbookEntryHints] = useState<Record<string, string>>({});
 
   const dragIdRef = useRef<string | null>(null);
+
+  const isTaskRunning = (key: string) => Boolean(runningTasks[key]);
+  const runningList = Object.values(runningTasks);
+  const anyRunning = runningList.length > 0;
+
+  const pushEvent = (type: "info" | "error", text: string) => {
+    setEvents((prev) => [...prev, { type, text, ts: Date.now() }].slice(-50));
+  };
+
+  const startTask = (key: string, label: string) => {
+    setRunningTasks((prev) => {
+      if (prev[key]) return prev;
+      return { ...prev, [key]: { label, startedAt: Date.now() } };
+    });
+  };
+
+  const endTask = (key: string) => {
+    setRunningTasks((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
 
   useEffect(() => {
     saveJson(SETTINGS_KEY, settings);
@@ -237,10 +260,9 @@ export default function Home() {
   };
 
   const callModels = async () => {
-    setError(null);
-    setNotice(null);
+    pushEvent("info", "开始拉取模型列表…");
     if (!settings.baseUrl || !settings.apiKey) {
-      setError("请先填写 baseUrl 和 apiKey");
+      pushEvent("error", "请先填写 baseUrl 和 apiKey");
       return;
     }
     setModelsLoading(true);
@@ -257,9 +279,9 @@ export default function Home() {
       const ids = (parsed.value.data ?? []).map((m) => m.id).filter(Boolean);
       setModels(ids);
       if (!settings.model && ids.length) setSettings((s) => ({ ...s, model: ids[0] }));
-      setNotice(`已拉取模型：${ids.length} 个`);
+      pushEvent("info", `已拉取模型：${ids.length} 个`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      pushEvent("error", e instanceof Error ? e.message : String(e));
     } finally {
       setModelsLoading(false);
     }
@@ -369,9 +391,8 @@ export default function Home() {
   };
 
   const generateField = async (field: keyof CharaCardV3["data"], instruction: string) => {
-    setBusy(`正在生成：${String(field)}`);
-    setError(null);
-    setNotice(null);
+    const taskKey = `field:${String(field)}`;
+    startTask(taskKey, `生成字段 ${String(field)}`);
     try {
       const custom = (fieldHints[field] ?? "").trim();
       const existing = String(card.data[field] ?? "");
@@ -387,18 +408,17 @@ export default function Home() {
         },
       ]);
       setCardField(field, content.trim());
-      setNotice(`已写入字段：${String(field)}`);
+      pushEvent("info", `已写入字段：${String(field)}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      pushEvent("error", e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(null);
+      endTask(taskKey);
     }
   };
 
   const generateFullCard = async () => {
-    setBusy("正在生成：整张卡");
-    setError(null);
-    setNotice(null);
+    const taskKey = "card:full";
+    startTask(taskKey, "生成整卡（覆盖）");
     try {
       const content = await callChat([
         { role: "system", content: systemPrompt },
@@ -411,18 +431,17 @@ export default function Home() {
       const parsed = tryParseJson<unknown>(jsonText);
       if (!parsed.ok) throw new Error(`JSON 解析失败：${parsed.error}`);
       setCard(normalizeImportedCard(parsed.value));
-      setNotice("已用模型输出覆盖当前草稿");
+      pushEvent("info", "已用模型输出覆盖当前草稿");
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      pushEvent("error", e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(null);
+      endTask(taskKey);
     }
   };
 
   const generateFullCardPlaceholder = async () => {
-    setBusy("正在生成：占位整卡");
-    setError(null);
-    setNotice(null);
+    const taskKey = "card:placeholder";
+    startTask(taskKey, "生成占位整卡");
     try {
       const content = await callChat([
         { role: "system", content: systemPrompt },
@@ -435,18 +454,17 @@ export default function Home() {
       const parsed = tryParseJson<unknown>(jsonText);
       if (!parsed.ok) throw new Error(`JSON 解析失败：${parsed.error}`);
       setCard(normalizeImportedCard(parsed.value));
-      setNotice("已生成占位整卡（后续可分字段/对话增量完善）");
+      pushEvent("info", "已生成占位整卡（后续可分字段/对话增量完善）");
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      pushEvent("error", e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(null);
+      endTask(taskKey);
     }
   };
 
   const generateWorldbook = async () => {
-    setBusy(worldbookAppend ? "正在生成：世界书条目（追加）" : "正在生成：世界书条目（覆盖）");
-    setError(null);
-    setNotice(null);
+    const taskKey = "worldbook:batch";
+    startTask(taskKey, worldbookAppend ? "世界书批量生成（追加）" : "世界书批量生成（覆盖）");
     try {
       const existingKeys = (card.data.character_book?.entries ?? [])
         .flatMap((e) => e.keys ?? [])
@@ -467,7 +485,7 @@ export default function Home() {
       const entries = (parsed.value as unknown[]).map(normalizeEntry);
       if (worldbookAppend) {
         appendWorldbookEntries(entries);
-        setNotice(`已追加 worldbook entries（本次 ${entries.length} 条）`);
+        pushEvent("info", `已追加 worldbook entries（本次 ${entries.length} 条）`);
       } else {
         setCard((prev) => ({
           ...prev,
@@ -479,12 +497,12 @@ export default function Home() {
             },
           },
         }));
-        setNotice(`已覆盖 worldbook entries（${entries.length} 条）`);
+        pushEvent("info", `已覆盖 worldbook entries（${entries.length} 条）`);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      pushEvent("error", e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(null);
+      endTask(taskKey);
     }
   };
 
@@ -492,9 +510,8 @@ export default function Home() {
     const entry = card.data.character_book?.entries?.[idx];
     if (!entry) return;
 
-    setBusy(`正在生成：世界书条目 ${idx + 1}`);
-    setError(null);
-    setNotice(null);
+    const taskKey = `worldbook:entry:${String(entry.id ?? idx)}`;
+    startTask(taskKey, `世界书条目 ${idx + 1} ${mode === "fill" ? "补全" : "改写"}`);
     try {
       const id = entry.id ?? String(idx);
       const hint = (worldbookEntryHints[id] ?? "").trim();
@@ -514,11 +531,11 @@ export default function Home() {
       ]);
 
       updateWorldbookEntry(idx, { content: content.trim() });
-      setNotice(`已更新世界书条目 ${idx + 1} content`);
+      pushEvent("info", `已更新世界书条目 ${idx + 1} content`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      pushEvent("error", e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(null);
+      endTask(taskKey);
     }
   };
 
@@ -526,8 +543,7 @@ export default function Home() {
     const text = chatInput.trim();
     if (!text) return;
     setChatInput("");
-    setError(null);
-    setNotice(null);
+    const taskKey = `chat:${Date.now()}`;
 
     const protocol = `当你需要让我自动更新草稿时，请使用以下标签输出结构化 JSON（可以同时出现多个标签；标签外可以有简短说明）：\n- <set_fields>{...}</set_fields>：更新角色卡 data 字段（name/description/personality/scenario/first_mes/mes_example/creator_notes/system_prompt/post_history_instructions/tags）\n- <append_entries>[...]</append_entries>：追加 worldbook entries（数组元素包含 keys/content/comment/enabled/position/insertion_order/constant/selective）\n要求：JSON 必须可解析，禁止代码块。`;
 
@@ -544,7 +560,7 @@ export default function Home() {
       },
     ];
 
-    setBusy("正在对话…");
+    startTask(taskKey, "对话增量");
     try {
       const reply = await callChat(messages);
       setChat((prev) => [...prev, { role: "user", content: text }, { role: "assistant", content: reply }]);
@@ -554,19 +570,20 @@ export default function Home() {
       if (setFieldsText) {
         const parsed = tryParseJson<Record<string, unknown>>(setFieldsText);
         if (parsed.ok) applySetFields(parsed.value);
-        else setError(`set_fields JSON 解析失败：${parsed.error}`);
+        else pushEvent("error", `set_fields JSON 解析失败：${parsed.error}`);
       }
       const appendEntriesText = extractTag(reply, "append_entries");
       if (appendEntriesText) {
         const parsed = tryParseJson<unknown>(appendEntriesText);
         if (parsed.ok && Array.isArray(parsed.value)) appendWorldbookEntries(parsed.value as unknown[]);
-        else if (parsed.ok) setError("append_entries 不是 JSON 数组");
-        else setError(`append_entries JSON 解析失败：${parsed.error}`);
+        else if (parsed.ok) pushEvent("error", "append_entries 不是 JSON 数组");
+        else pushEvent("error", `append_entries JSON 解析失败：${parsed.error}`);
       }
+      pushEvent("info", "对话完成");
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      pushEvent("error", e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(null);
+      endTask(taskKey);
     }
   };
 
@@ -611,10 +628,8 @@ export default function Home() {
   };
 
   const exportPng = () => {
-    setError(null);
-    setNotice(null);
     if (!png) {
-      setError("请先上传一张 PNG（作为封面底图）");
+      pushEvent("error", "请先上传一张 PNG（作为封面底图）");
       return;
     }
     try {
@@ -623,9 +638,9 @@ export default function Home() {
       const name = (card.data.name || "character").replace(/[\\/:*?"<>|]/g, "_");
       const ab = out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) as ArrayBuffer;
       downloadBlob(new Blob([ab], { type: "image/png" }), `${name}.png`);
-      setNotice("已导出 PNG（已写入 chara/ccv3 元数据）");
+      pushEvent("info", "已导出 PNG（已写入 chara/ccv3 元数据）");
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      pushEvent("error", e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -634,11 +649,11 @@ export default function Home() {
     const text = await file.text();
     const parsed = tryParseJson<unknown>(text);
     if (!parsed.ok) {
-      setError(`导入 JSON 失败：${parsed.error}`);
+      pushEvent("error", `导入 JSON 失败：${parsed.error}`);
       return;
     }
     setCard(normalizeImportedCard(parsed.value));
-    setNotice("已导入 JSON 到草稿");
+    pushEvent("info", "已导入 JSON 到草稿");
   };
 
   const importPngFile = async (file: File | null) => {
@@ -646,25 +661,24 @@ export default function Home() {
     const bytes = new Uint8Array(await file.arrayBuffer());
     const extracted = extractCardFromPng(bytes);
     if (!extracted) {
-      setError("未在 PNG 中找到 chara/ccv3 元数据");
+      pushEvent("error", "未在 PNG 中找到 chara/ccv3 元数据");
       return;
     }
     const parsed = tryParseJson<unknown>(extracted.jsonText);
     if (!parsed.ok) {
-      setError(`PNG 元数据 JSON 解析失败：${parsed.error}`);
+      pushEvent("error", `PNG 元数据 JSON 解析失败：${parsed.error}`);
       return;
     }
     setCard(normalizeImportedCard(parsed.value));
     await setPngFile(file);
-    setNotice(`已从 PNG 导入角色卡（${extracted.keyword}）`);
+    pushEvent("info", `已从 PNG 导入角色卡（${extracted.keyword}）`);
   };
 
   const clearAll = () => {
     setCard(emptyCardV3());
     setGoal("");
     setRefFiles([]);
-    setNotice("已清空草稿与资料");
-    setError(null);
+    pushEvent("info", "已清空草稿与资料");
   };
 
   const tabs = (Object.keys(tabLabel) as TabKey[]).map((k) => (
@@ -692,10 +706,15 @@ export default function Home() {
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button onClick={() => void generateFullCard()} disabled={!!busy} title="让模型生成整张卡（会覆盖当前草稿）">
+            <Button onClick={() => void generateFullCard()} disabled={anyRunning} title="让模型生成整张卡（会覆盖当前草稿）">
               生成整卡
             </Button>
-            <Button onClick={() => void generateFullCardPlaceholder()} disabled={!!busy} variant="secondary" title="先生成占位版骨架，后续再分批完善">
+            <Button
+              onClick={() => void generateFullCardPlaceholder()}
+              disabled={anyRunning}
+              variant="secondary"
+              title="先生成占位版骨架，后续再分批完善"
+            >
               占位整卡
             </Button>
             <Button onClick={exportJson} variant="secondary">
@@ -710,11 +729,21 @@ export default function Home() {
           </div>
         </header>
 
-        {(notice || error || busy) && (
+        {(events.length > 0 || anyRunning) && (
           <div className="rounded-xl bg-white p-3 text-sm ring-1 ring-zinc-200 dark:bg-zinc-950 dark:ring-zinc-800">
-            {busy && <div className="text-zinc-700 dark:text-zinc-300">⏳ {busy}</div>}
-            {notice && <div className="text-emerald-700 dark:text-emerald-300">{notice}</div>}
-            {error && <div className="text-red-700 dark:text-red-300">{error}</div>}
+            {anyRunning && (
+              <div className="mb-2 text-zinc-700 dark:text-zinc-300">
+                ⏳ 进行中：{runningList.map((t) => t.label).join(" · ")}
+              </div>
+            )}
+            {events.slice(-5).map((e, i) => (
+              <div
+                key={i}
+                className={e.type === "error" ? "text-red-700 dark:text-red-300" : "text-emerald-700 dark:text-emerald-300"}
+              >
+                {e.text}
+              </div>
+            ))}
           </div>
         )}
 
@@ -855,7 +884,7 @@ export default function Home() {
                   <div className="flex items-end justify-between gap-2">
                     <Label>description</Label>
                     <Button
-                      disabled={!!busy}
+                      disabled={isTaskRunning("field:description")}
                       variant="secondary"
                       onClick={() => void generateField("description", "请写角色卡的 description：简短、抓人、包含玩法/卖点。")}
                     >
@@ -874,7 +903,7 @@ export default function Home() {
                   <div className="flex items-end justify-between gap-2">
                     <Label>personality</Label>
                     <Button
-                      disabled={!!busy}
+                      disabled={isTaskRunning("field:personality")}
                       variant="secondary"
                       onClick={() => void generateField("personality", "请写角色卡的 personality：性格要具体、有矛盾点、能驱动对话。")}
                     >
@@ -893,7 +922,7 @@ export default function Home() {
                   <div className="flex items-end justify-between gap-2">
                     <Label>scenario</Label>
                     <Button
-                      disabled={!!busy}
+                      disabled={isTaskRunning("field:scenario")}
                       variant="secondary"
                       onClick={() => void generateField("scenario", "请写角色卡的 scenario：交代关系、场景、动机和互动边界。")}
                     >
@@ -912,7 +941,7 @@ export default function Home() {
                   <div className="flex items-end justify-between gap-2">
                     <Label>first_mes</Label>
                     <Button
-                      disabled={!!busy}
+                      disabled={isTaskRunning("field:first_mes")}
                       variant="secondary"
                       onClick={() => void generateField("first_mes", "请写角色卡的 first_mes：开场白要有动作/场景/钩子，能自然引导 {{user}} 回复。")}
                     >
@@ -931,7 +960,7 @@ export default function Home() {
                   <div className="flex items-end justify-between gap-2">
                     <Label>mes_example</Label>
                     <Button
-                      disabled={!!busy}
+                      disabled={isTaskRunning("field:mes_example")}
                       variant="secondary"
                       onClick={() => void generateField("mes_example", "请写角色卡的 mes_example：提供 2-4 段高质量对话示例，体现角色口吻与玩法。")}
                     >
@@ -1003,7 +1032,7 @@ export default function Home() {
                   </div>
                   <div className="flex flex-col gap-2">
                     <Label>快捷</Label>
-                    <Button variant="secondary" disabled={!!busy} onClick={() => void generateWorldbook()}>
+                    <Button variant="secondary" disabled={isTaskRunning("worldbook:batch")} onClick={() => void generateWorldbook()}>
                       AI 生成条目
                     </Button>
                   </div>
@@ -1027,12 +1056,12 @@ export default function Home() {
                   <div className="flex items-end justify-between gap-2">
                     <Label>entries</Label>
                     <div className="flex gap-2">
-                      <Button variant="secondary" disabled={!!busy} onClick={() => void generateWorldbook()}>
+                      <Button variant="secondary" disabled={isTaskRunning("worldbook:batch")} onClick={() => void generateWorldbook()}>
                         AI 生成条目
                       </Button>
                       <Button
                         variant="secondary"
-                        disabled={!!busy}
+                        disabled={isTaskRunning("worldbook:batch")}
                         onClick={() =>
                           setCard((prev) => ({
                             ...prev,
@@ -1082,7 +1111,7 @@ export default function Home() {
                         <div className="flex items-center gap-2">
                           <Button
                             variant="secondary"
-                            disabled={!!busy}
+                            disabled={isTaskRunning(`worldbook:entry:${String(e.id ?? idx)}`)}
                             onClick={() => void generateWorldbookEntryContent(idx, (e.content ?? "").trim() ? "rewrite" : "fill")}
                             title="为本条生成/改写 content（不改 keys/comment 等）"
                           >
@@ -1180,14 +1209,14 @@ export default function Home() {
                         <div className="flex flex-wrap gap-2">
                           <Button
                             variant="secondary"
-                            disabled={!!busy}
+                            disabled={isTaskRunning(`worldbook:entry:${String(e.id ?? idx)}`)}
                             onClick={() => void generateWorldbookEntryContent(idx, "fill")}
                           >
                             AI 补全 content
                           </Button>
                           <Button
                             variant="secondary"
-                            disabled={!!busy}
+                            disabled={isTaskRunning(`worldbook:entry:${String(e.id ?? idx)}`)}
                             onClick={() => void generateWorldbookEntryContent(idx, "rewrite")}
                           >
                             AI 改写 content
@@ -1231,10 +1260,9 @@ export default function Home() {
                     onChange={(v) => {
                       const parsed = tryParseJson<Record<string, unknown>>(v);
                       if (!parsed.ok) {
-                        setError(`extensions JSON 无法解析：${parsed.error}`);
+                        pushEvent("error", `extensions JSON 无法解析：${parsed.error}`);
                         return;
                       }
-                      setError(null);
                       setCard((prev) => ({ ...prev, data: { ...prev.data, extensions: parsed.value } }));
                     }}
                   />
@@ -1291,12 +1319,12 @@ export default function Home() {
                     placeholder="例如：继续追加世界书 8 条，主题是【势力/地点/规则】，不要重复已有 keys；或：把 scenario 改成更强互动边界。"
                   />
                   <div className="flex flex-wrap gap-2">
-                    <Button onClick={() => void sendChat()} disabled={!!busy}>
+                    <Button onClick={() => void sendChat()} disabled={isTaskRunning("card:full") || isTaskRunning("card:placeholder")}>
                       发送
                     </Button>
                     <Button
                       variant="secondary"
-                      disabled={!!busy}
+                      disabled={isTaskRunning("card:full") || isTaskRunning("card:placeholder")}
                       onClick={() => {
                         setChatInput("继续追加世界书 8 条，主题为【势力/地点/规则】，不要重复已有 keys；content 允许先用（待补充）占位。");
                       }}
@@ -1305,7 +1333,7 @@ export default function Home() {
                     </Button>
                     <Button
                       variant="secondary"
-                      disabled={!!busy}
+                      disabled={isTaskRunning("card:full") || isTaskRunning("card:placeholder")}
                       onClick={() => {
                         setChatInput("请检查当前卡是否有明显逻辑漏洞或写卡禁忌，并用 <set_fields> 给出改进后的字段（尽量只改必要字段）。");
                       }}
@@ -1412,7 +1440,7 @@ export default function Home() {
                     variant="secondary"
                     onClick={() => {
                       setModels([]);
-                      setNotice("已清空本地模型列表");
+                      pushEvent("info", "已清空本地模型列表");
                     }}
                   >
                     清空模型列表
