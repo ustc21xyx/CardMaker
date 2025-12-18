@@ -201,6 +201,9 @@ export default function Home() {
   );
 
   const [worldbookEntryHints, setWorldbookEntryHints] = useState<Record<string, string>>({});
+  const [worldbookEntryDiffs, setWorldbookEntryDiffs] = useState<
+    Record<string, { diff: string; baseHash: number; generatedAt: number }>
+  >({});
 
   const dragIdRef = useRef<string | null>(null);
 
@@ -210,6 +213,99 @@ export default function Home() {
 
   const pushEvent = (type: "info" | "error", text: string) => {
     setEvents((prev) => [...prev, { type, text, ts: Date.now() }].slice(-50));
+  };
+
+  const hashText = (input: string): number => {
+    let hash = 5381;
+    for (let i = 0; i < input.length; i += 1) {
+      hash = ((hash << 5) + hash) ^ input.charCodeAt(i);
+    }
+    return hash >>> 0;
+  };
+
+  const applyUnifiedDiffToText = (
+    originalText: string,
+    unifiedDiff: string,
+  ): { ok: true; text: string } | { ok: false; error: string } => {
+    const rawLines = unifiedDiff.replace(/\r\n/g, "\n").split("\n");
+    const lines = rawLines.filter((l) => l.length > 0);
+    if (lines.length === 0) return { ok: true, text: originalText };
+
+    let i = 0;
+    if (lines[i]?.startsWith("--- ")) i += 1;
+    if (lines[i]?.startsWith("+++ ")) i += 1;
+
+    const originalLines = originalText.replace(/\r\n/g, "\n").split("\n");
+    const out: string[] = [];
+    let origIdx = 0;
+
+    const flushUntil = (targetLine1Based: number) => {
+      const targetIdx = Math.max(0, targetLine1Based - 1);
+      while (origIdx < targetIdx && origIdx < originalLines.length) {
+        out.push(originalLines[origIdx]);
+        origIdx += 1;
+      }
+    };
+
+    const parseHunkHeader = (header: string) => {
+      const m = header.match(/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/);
+      if (!m) return null;
+      return {
+        fromLine: Number(m[1]),
+        fromCount: m[2] ? Number(m[2]) : 1,
+        toLine: Number(m[3]),
+        toCount: m[4] ? Number(m[4]) : 1,
+      };
+    };
+
+    while (i < lines.length) {
+      const line = lines[i];
+      if (!line.startsWith("@@")) {
+        i += 1;
+        continue;
+      }
+
+      const header = parseHunkHeader(line);
+      if (!header) return { ok: false, error: "无法解析 diff 的 hunk header" };
+      flushUntil(header.fromLine);
+      i += 1;
+
+      while (i < lines.length && !lines[i].startsWith("@@")) {
+        const hunkLine = lines[i];
+        if (hunkLine === "\\ No newline at end of file") {
+          i += 1;
+          continue;
+        }
+        const prefix = hunkLine[0];
+        const payload = hunkLine.slice(1);
+
+        if (prefix === " ") {
+          if (originalLines[origIdx] !== payload) {
+            return { ok: false, error: "diff 上下文与当前内容不匹配（请重新生成 diff）" };
+          }
+          out.push(payload);
+          origIdx += 1;
+        } else if (prefix === "-") {
+          if (originalLines[origIdx] !== payload) {
+            return { ok: false, error: "diff 删除行与当前内容不匹配（请重新生成 diff）" };
+          }
+          origIdx += 1;
+        } else if (prefix === "+") {
+          out.push(payload);
+        } else {
+          return { ok: false, error: "diff 格式不支持（仅支持 unified diff）" };
+        }
+
+        i += 1;
+      }
+    }
+
+    while (origIdx < originalLines.length) {
+      out.push(originalLines[origIdx]);
+      origIdx += 1;
+    }
+
+    return { ok: true, text: out.join("\n") };
   };
 
   const startTask = (key: string, label: string) => {
@@ -506,37 +602,79 @@ export default function Home() {
     }
   };
 
-  const generateWorldbookEntryContent = async (idx: number, mode: "fill" | "rewrite") => {
+  const generateWorldbookEntryContentDiff = async (idx: number) => {
     const entry = card.data.character_book?.entries?.[idx];
     if (!entry) return;
 
     const taskKey = `worldbook:entry:${String(entry.id ?? idx)}`;
-    startTask(taskKey, `世界书条目 ${idx + 1} ${mode === "fill" ? "补全" : "改写"}`);
+    startTask(taskKey, `世界书条目 ${idx + 1} 生成 Diff`);
     try {
-      const id = entry.id ?? String(idx);
-      const hint = (worldbookEntryHints[id] ?? "").trim();
+      const id = String(entry.id ?? idx);
+      const instruction = (worldbookEntryHints[id] ?? "").trim();
+      if (!instruction) {
+        pushEvent("error", "请先在“本条 AI 指令”里输入你希望怎么改，然后再生成 Diff");
+        return;
+      }
+
       const keys = (entry.keys ?? []).join("、");
       const existing = entry.content ?? "";
+      const numbered = existing
+        .replace(/\r\n/g, "\n")
+        .split("\n")
+        .map((l, n) => `${String(n + 1).padStart(3, " ")} | ${l}`)
+        .join("\n");
 
-      const content = await callChat([
+      const diff = await callChat([
         { role: "system", content: systemPrompt },
         {
           role: "user",
-          content: `${buildContextUser()}\n【目标条目】\nkeys：${keys || "(空)"}\ncomment：${entry.comment || "(空)"}\nposition：${entry.position || "before_char"}\n\n【当前 content】\n${existing || "(空)"}\n\n【任务】\n${
-            mode === "fill"
-              ? `请补全该 worldbook 条目的 content，使其可直接用于酒馆触发，并尽量与 keys/comment 匹配。${hint ? `\n额外要求：${hint}` : ""}`
-              : `请改写该 worldbook 条目的 content，保留信息但让表达更清晰、更适合被模型吸收。${hint ? `\n额外要求：${hint}` : ""}`
-          }\n\n要求：只输出 content 文本本体，不要 JSON，不要代码块，不要解释。`,
+          content: `${buildContextUser()}\n【目标条目】\nkeys：${keys || "(空)"}\ncomment：${entry.comment || "(空)"}\nposition：${entry.position || "before_char"}\n\n【当前 content（带行号）】\n${numbered || "(空)"}\n\n【用户指令】\n${instruction}\n\n【任务】\n请在尽量少改动现有内容的前提下，根据“用户指令”对 content 做修改，并输出“unified diff”。\n\n严格要求：\n1) 只输出 diff 文本本体，不要解释，不要代码块\n2) diff 目标文件名固定为 content，必须包含：\n--- a/content\n+++ b/content\n3) 必须包含至少一个 hunk（@@ -l,s +l,s @@），并尽量提供足够上下文行保证可应用\n4) 除非用户明确要求，否则不要改动无关行；如果只是补充信息，请尽量采用追加/局部插入而不是重写全文\n`,
         },
       ]);
 
-      updateWorldbookEntry(idx, { content: content.trim() });
-      pushEvent("info", `已更新世界书条目 ${idx + 1} content`);
+      setWorldbookEntryDiffs((prev) => ({
+        ...prev,
+        [id]: { diff: diff.trim(), baseHash: hashText(existing), generatedAt: Date.now() },
+      }));
+      pushEvent("info", `已生成世界书条目 ${idx + 1} Diff（可预览后应用）`);
     } catch (e) {
       pushEvent("error", e instanceof Error ? e.message : String(e));
     } finally {
       endTask(taskKey);
     }
+  };
+
+  const applyWorldbookEntryDiff = (idx: number) => {
+    const entry = card.data.character_book?.entries?.[idx];
+    if (!entry) return;
+
+    const id = String(entry.id ?? idx);
+    const record = worldbookEntryDiffs[id];
+    if (!record?.diff) {
+      pushEvent("error", "没有可应用的 Diff，请先生成 Diff");
+      return;
+    }
+
+    const current = entry.content ?? "";
+    if (hashText(current) !== record.baseHash) {
+      pushEvent("error", "content 已发生变化（与生成 Diff 时不一致），请重新生成 Diff");
+      return;
+    }
+
+    const applied = applyUnifiedDiffToText(current, record.diff);
+    if (!applied.ok) {
+      pushEvent("error", applied.error);
+      return;
+    }
+
+    updateWorldbookEntry(idx, { content: applied.text });
+    setWorldbookEntryDiffs((prev) => {
+      if (!prev[id]) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    pushEvent("info", `已应用世界书条目 ${idx + 1} Diff`);
   };
 
   const sendChat = async () => {
@@ -1109,14 +1247,6 @@ export default function Home() {
                       <div className="mb-2 flex items-center justify-between gap-2">
                         <div className="text-sm font-semibold">条目 {idx + 1}</div>
                         <div className="flex items-center gap-2">
-                          <Button
-                            variant="secondary"
-                            disabled={isTaskRunning(`worldbook:entry:${String(e.id ?? idx)}`)}
-                            onClick={() => void generateWorldbookEntryContent(idx, (e.content ?? "").trim() ? "rewrite" : "fill")}
-                            title="为本条生成/改写 content（不改 keys/comment 等）"
-                          >
-                            AI 补全本条
-                          </Button>
                           <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200">
                             <input
                               type="checkbox"
@@ -1203,25 +1333,62 @@ export default function Home() {
                         <Label>本条 AI 指令（可选）</Label>
                         <TextInput
                           value={worldbookEntryHints[(e.id ?? String(idx)) as string] ?? ""}
-                          onChange={(v) => setWorldbookEntryHints((prev) => ({ ...prev, [String(e.id ?? idx)]: v }))}
-                          placeholder="例如：更偏设定书口吻/补充细节/加一条规则边界…"
+                          onChange={(v) => {
+                            const id = String(e.id ?? idx);
+                            setWorldbookEntryHints((prev) => ({ ...prev, [id]: v }));
+                            setWorldbookEntryDiffs((prev) => {
+                              if (!prev[id]) return prev;
+                              const next = { ...prev };
+                              delete next[id];
+                              return next;
+                            });
+                          }}
+                          placeholder="例如：只新增一条规则（不要改其它段落）；把第 3 行改成更口语；补充地点细节（只追加）…"
                         />
                         <div className="flex flex-wrap gap-2">
                           <Button
                             variant="secondary"
                             disabled={isTaskRunning(`worldbook:entry:${String(e.id ?? idx)}`)}
-                            onClick={() => void generateWorldbookEntryContent(idx, "fill")}
+                            onClick={() => void generateWorldbookEntryContentDiff(idx)}
                           >
-                            AI 补全 content
+                            AI 生成 Diff
                           </Button>
                           <Button
                             variant="secondary"
-                            disabled={isTaskRunning(`worldbook:entry:${String(e.id ?? idx)}`)}
-                            onClick={() => void generateWorldbookEntryContent(idx, "rewrite")}
+                            disabled={
+                              isTaskRunning(`worldbook:entry:${String(e.id ?? idx)}`) ||
+                              !worldbookEntryDiffs[String(e.id ?? idx)]?.diff
+                            }
+                            onClick={() => applyWorldbookEntryDiff(idx)}
                           >
-                            AI 改写 content
+                            应用 Diff
+                          </Button>
+                          <Button
+                            variant="secondary"
+                            disabled={!worldbookEntryDiffs[String(e.id ?? idx)]?.diff}
+                            onClick={() => {
+                              const id = String(e.id ?? idx);
+                              setWorldbookEntryDiffs((prev) => {
+                                if (!prev[id]) return prev;
+                                const next = { ...prev };
+                                delete next[id];
+                                return next;
+                              });
+                            }}
+                          >
+                            丢弃 Diff
                           </Button>
                         </div>
+                        {worldbookEntryDiffs[String(e.id ?? idx)]?.diff && (
+                          <details className="rounded-lg bg-white p-3 ring-1 ring-zinc-200 dark:bg-zinc-950 dark:ring-zinc-800" open>
+                            <summary className="cursor-pointer text-sm text-zinc-700 dark:text-zinc-200">
+                              Diff 预览（应用前建议检查）
+                            </summary>
+                            <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-zinc-50 p-2 text-xs text-zinc-800 ring-1 ring-zinc-200 dark:bg-zinc-900 dark:text-zinc-100 dark:ring-zinc-800">
+                              {worldbookEntryDiffs[String(e.id ?? idx)]?.diff}
+                            </pre>
+                          </details>
+                        )}
                       </div>
 
                       <div className="mt-3 flex flex-col gap-2">
@@ -1229,7 +1396,14 @@ export default function Home() {
                         <TextArea
                           value={e.content ?? ""}
                           rows={8}
-                          onChange={(v) =>
+                          onChange={(v) => {
+                            const id = String(e.id ?? idx);
+                            setWorldbookEntryDiffs((prev) => {
+                              if (!prev[id]) return prev;
+                              const next = { ...prev };
+                              delete next[id];
+                              return next;
+                            });
                             setCard((prev) => ({
                               ...prev,
                               data: {
@@ -1239,8 +1413,8 @@ export default function Home() {
                                   entries: (prev.data.character_book?.entries ?? []).map((x, i) => (i === idx ? { ...x, content: v } : x)),
                                 },
                               },
-                            }))
-                          }
+                            }));
+                          }}
                         />
                       </div>
                     </div>
