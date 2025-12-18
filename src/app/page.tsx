@@ -1351,7 +1351,7 @@ export default function Home() {
                             disabled={isTaskRunning(`worldbook:entry:${String(e.id ?? idx)}`)}
                             onClick={() => void generateWorldbookEntryContentDiff(idx)}
                           >
-                            AI 生成 Diff
+                            生成
                           </Button>
                           <Button
                             variant="secondary"
@@ -1361,28 +1361,33 @@ export default function Home() {
                             }
                             onClick={() => applyWorldbookEntryDiff(idx)}
                           >
-                            应用 Diff
-                          </Button>
-                          <Button
-                            variant="secondary"
-                            disabled={!worldbookEntryDiffs[String(e.id ?? idx)]?.diff}
-                            onClick={() => {
-                              const id = String(e.id ?? idx);
-                              setWorldbookEntryDiffs((prev) => {
-                                if (!prev[id]) return prev;
-                                const next = { ...prev };
-                                delete next[id];
-                                return next;
-                              });
-                            }}
-                          >
-                            丢弃 Diff
+                            修改
                           </Button>
                         </div>
                         {worldbookEntryDiffs[String(e.id ?? idx)]?.diff && (
                           <details className="rounded-lg bg-white p-3 ring-1 ring-zinc-200 dark:bg-zinc-950 dark:ring-zinc-800" open>
                             <summary className="cursor-pointer text-sm text-zinc-700 dark:text-zinc-200">
-                              Diff 预览（应用前建议检查）
+                              <span className="flex items-center justify-between gap-2">
+                                <span>修改预览（应用前建议检查）</span>
+                                <button
+                                  type="button"
+                                  className="rounded-md px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                                  onClick={(ev) => {
+                                    ev.preventDefault();
+                                    ev.stopPropagation();
+                                    const id = String(e.id ?? idx);
+                                    setWorldbookEntryDiffs((prev) => {
+                                      if (!prev[id]) return prev;
+                                      const next = { ...prev };
+                                      delete next[id];
+                                      return next;
+                                    });
+                                  }}
+                                  title="丢弃本次生成的修改"
+                                >
+                                  丢弃
+                                </button>
+                              </span>
                             </summary>
                             <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-zinc-50 p-2 text-xs text-zinc-800 ring-1 ring-zinc-200 dark:bg-zinc-900 dark:text-zinc-100 dark:ring-zinc-800">
                               {worldbookEntryDiffs[String(e.id ?? idx)]?.diff}
